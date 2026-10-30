@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Maze Scrub</title>
+  <!-- Maze Scrub: the Maze family's square frame around a file's hidden lines
+       of metadata. A lit blade sweeps across on the diagonal: behind it the
+       lines are still there, past it the file is clean. Black and white. -->
+  <defs>
+    <radialGradient id="ms-glow" cx="512" cy="512" r="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ms-lit" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cfcfd8"/>
+    </linearGradient>
+    <clipPath id="ms-dirty">
+      <polygon points="300,300 676,300 300,676"/>
+    </clipPath>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="#000"/>
+  <circle cx="512" cy="512" r="360" fill="url(#ms-glow)"/>
+  <rect x="245" y="245" width="534" height="534" fill="none" stroke="#f2f2f4"
+        stroke-width="46" stroke-linejoin="miter"/>
+  <g clip-path="url(#ms-dirty)" fill="#8a8a92">
+    <rect x="336" y="352" width="352" height="40"/>
+    <rect x="336" y="432" width="352" height="40"/>
+    <rect x="336" y="512" width="352" height="40"/>
+    <rect x="336" y="592" width="352" height="40"/>
+  </g>
+  <line x1="372" y1="694" x2="694" y2="372" stroke="url(#ms-lit)" stroke-width="48"
+        stroke-linecap="round"/>
+</svg>

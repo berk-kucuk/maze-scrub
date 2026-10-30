@@ -1,0 +1,79 @@
+# Maintainer: berkkucukk <berkkucukk@proton.me>
+#
+# LOCAL-BUILD PKGBUILD — see ../build-pkg.sh, which writes `pkgver` and drops
+# `maze-scrub-$pkgver.tar.gz` next to this file before invoking makepkg.
+
+pkgname=maze-scrub
+pkgver=1.0.1
+pkgrel=1
+pkgdesc="Maze Scrub — see what your photos and documents reveal about you, then remove it (mat2)"
+arch=('any')
+url="https://mazelinux.berkkucukk.com.tr"
+license=('GPL3')
+
+# No privileges, no service, no network. mat2 does the reading and cleaning
+# under the system Python (see mazescrub/helper/mat2_helper.py); the window
+# runs on the shared Maze runtime.
+depends=(
+    'maze-python'   # shared Python runtime with PyQt6: /opt/maze/venv
+    'mat2'          # the metadata engine (pulls in exiftool, mutagen, poppler)
+    'python'        # /usr/bin/python3, which mat2 is built for
+    'glib2'         # `gio trash`, for originals on another drive
+)
+optdepends=(
+    'ffmpeg: clean video and audio metadata'
+    'bubblewrap: run exiftool and ffmpeg in a sandbox while cleaning'
+)
+makedepends=('imagemagick')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    cd "$srcdir/maze-scrub-${pkgver}"
+
+    install -dm755 "$pkgdir/opt/maze-scrub"
+    cp -r mazescrub main.py "$pkgdir/opt/maze-scrub/"
+    install -m644 MAZE-SCRUB.png maze-scrub-logo.svg "$pkgdir/opt/maze-scrub/"
+
+    install -dm755 "$pkgdir/usr/bin"
+    install -m755 /dev/stdin "$pkgdir/usr/bin/maze-scrub" << 'LAUNCHER'
+#!/usr/bin/env bash
+exec /opt/maze/venv/bin/python3 /opt/maze-scrub/main.py "$@"
+LAUNCHER
+
+    install -dm755 "$pkgdir/usr/share/applications"
+    install -m644 /dev/stdin "$pkgdir/usr/share/applications/maze-scrub.desktop" << 'DESKTOP'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Maze Scrub
+GenericName=Metadata Cleaner
+GenericName[tr]=Metadata Temizleyici
+Comment=See what your photos and documents reveal about you, then remove it
+Comment[tr]=Fotoğraf ve belgelerinizin sizin hakkınızda ne açığa çıkardığını görün, sonra silin
+Exec=/usr/bin/maze-scrub %F
+Icon=maze-scrub
+Terminal=false
+Categories=Utility;Security;
+Keywords=metadata;exif;gps;privacy;mat2;clean;scrub;metaveri;gizlilik;konum;
+StartupNotify=true
+StartupWMClass=maze-scrub
+DESKTOP
+
+    # Dolphin: right-click → "Remove metadata" on any file or folder.
+    install -Dm644 maze-scrub-servicemenu.desktop \
+        "$pkgdir/usr/share/kio/servicemenus/maze-scrub.desktop"
+
+    install -Dm644 maze-scrub-logo.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/maze-scrub.svg"
+    for size in 16 22 24 32 48 64 128 256 512; do
+        install -dm755 "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps"
+        magick MAZE-SCRUB.png -resize "${size}x${size}" \
+            "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/maze-scrub.png" \
+            2>/dev/null || install -m644 MAZE-SCRUB.png \
+            "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/maze-scrub.png"
+    done
+
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

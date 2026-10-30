@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+MimeType=all/allfiles;inode/directory;
+Actions=scrub;
+X-KDE-Priority=TopLevel
+
+[Desktop Action scrub]
+Name=Remove metadata
+Name[tr]=Metadata'yı temizle
+Icon=maze-scrub
+Exec=/usr/bin/maze-scrub %F

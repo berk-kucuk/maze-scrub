@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maze-scrub"
+version = "1.0.1"
+description = "Maze Scrub — see what your photos and documents reveal about you, then remove it (mat2)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "berkkucukk", email = "berkkucukk@proton.me" }]
+dependencies = ["PyQt6>=6.6.0"]
+
+[project.urls]
+Homepage = "https://mazelinux.berkkucukk.com.tr"
+
+[project.scripts]
+maze-scrub = "mazescrub.gui.app:run"
+
+[tool.setuptools.packages.find]
+include = ["mazescrub*"]

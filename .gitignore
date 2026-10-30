@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# virtualenv
+.venv/
+venv/
+
+# tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# makepkg output (build-pkg.sh)
+dist-pkg/
+*.pkg.tar.*
+*.src.tar.*
+pkg/
+src/
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# local tooling
+.claude/
+*.log
+
+# Output of trying the app on real files in the source tree: cleaned copies
+# and the temp files of an interrupted replace. Personal photos and documents
+# must never end up in the repository.
+*.cleaned.*
+*.cleaned-*.*
+.*.scrub-*
+
+# secrets that must never be committed
+.env
+.env.*
+*.pem
+*.p12
+*.key
+*.gpg
