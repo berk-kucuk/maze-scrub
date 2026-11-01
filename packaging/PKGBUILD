@@ -4,7 +4,7 @@
 # `maze-scrub-$pkgver.tar.gz` next to this file before invoking makepkg.
 
 pkgname=maze-scrub
-pkgver=1.0.1
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Maze Scrub — see what your photos and documents reveal about you, then remove it (mat2)"
 arch=('any')

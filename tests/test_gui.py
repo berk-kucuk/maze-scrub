@@ -46,6 +46,14 @@ class I18nTestCase(unittest.TestCase):
                 i18n.t(key, **{n: "x" for n in names})
         i18n.set_language("en")
 
+    def test_turkish_upper_case(self):
+        i18n.set_language("tr")
+        self.assertEqual(i18n.upper("Kişisel"), "KİŞİSEL")
+        self.assertEqual(i18n.upper("Desteklenmiyor"), "DESTEKLENMİYOR")
+        self.assertEqual(i18n.upper("Yazılım"), "YAZILIM")
+        i18n.set_language("en")
+        self.assertEqual(i18n.upper("Device"), "DEVICE")
+
     def test_every_error_reason_has_text(self):
         for reason in ("readonly_dir", "clean_failed", "trash_failed", "changed",
                        "rename_failed"):
@@ -99,7 +107,7 @@ class WindowTestCase(unittest.TestCase):
         self.assertFalse(self._item("plain.jpg").cleanable)      # nothing to remove
         self.assertFalse(self._item("notes.xyz").report.supported)
 
-        self.w.toggle(photo)                                      # renders the fields
+        self.w.select(photo)                                      # renders the fields
         self.w.clean()
         self._pump(lambda: photo.result is not None and not self.w.busy)
         self.assertTrue(photo.result.ok)
@@ -124,14 +132,37 @@ class WindowTestCase(unittest.TestCase):
             i.report and i.report.error != "cancelled" for i in self.w.items.values()), 30)
         self.assertFalse(any(i.report.error == "cancelled" for i in self.w.items.values()))
 
-    def test_rows_are_reused_between_renders(self):
+    def test_filters_and_selection(self):
         self.w.add_paths([str(self.files)])
         self._pump(lambda: self.w.items and all(i.report for i in self.w.items.values())
                    and not self.w.busy)
-        self.w._render()
-        before = {k: id(r) for k, (_s, r) in self.w._rows.items()}
-        self.w._render()
-        self.assertEqual(before, {k: id(r) for k, (_s, r) in self.w._rows.items()})
+        self.assertEqual(self.w.model.rowCount(), 3)
+        photo = self._item("photo.jpg")
+        self.w.select(photo)
+        self.w.set_filter("revealing")
+        self.assertEqual(self.w.model.keys, [str(photo.path)])
+        self.assertEqual(self.w.selected, str(photo.path), "selection survives a filter")
+        self.w.set_filter("other")
+        self.assertEqual(sorted(k.split("/")[-1] for k in self.w.model.keys),
+                         ["notes.xyz", "plain.jpg"])
+        self.w.set_filter("all")
+        self.w.remove_key(str(photo.path))
+        self.assertEqual(self.w.model.rowCount(), 2)
+        self.assertIn(self.w.selected, self.w.model.keys, "selection moves to another file")
+
+    def test_a_finished_file_repaints_only_its_row(self):
+        self.w.add_paths([str(self.files)])
+        self._pump(lambda: self.w.items and all(i.report for i in self.w.items.values())
+                   and not self.w.busy)
+        changed = []
+        self.w.model.dataChanged.connect(lambda a, b: changed.append(a.row()))
+        resets = []
+        self.w.model.modelReset.connect(lambda: resets.append(1))
+        key = str(self._item("photo.jpg").path)
+        self.w._dirty.add(key)
+        self.w._flush_live()
+        self.assertEqual(changed, [self.w.model.keys.index(key)])
+        self.assertEqual(resets, [], "no full rebuild for one file")
 
     def test_language_switch_rebuilds(self):
         self.w.set_lang("tr")

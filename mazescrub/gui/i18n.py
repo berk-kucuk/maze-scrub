@@ -34,6 +34,29 @@ STRINGS: dict[str, dict[str, str]] = {
                          "images) cannot be cleaned without them.",
         # list
         "sec_files": "FILES",
+        "filter_all": "All",
+        "filter_revealing": "Revealing",
+        "filter_cleaned": "Cleaned",
+        "filter_other": "Other",
+        "btn_limits": "What Scrub can't do",
+        "inspector_empty": "Select a file to see everything it says about you.",
+        "inspector_none": "mat2 found no metadata in this file. There is nothing to remove.",
+        "sec_other": "OTHER FIELDS",
+        "sec_result": "RESULT",
+        "mode_copy_short": "Keep originals",
+        "mode_replace_short": "Replace originals",
+        "list_empty_title": "See what your files say about you.",
+        "list_empty_sub": "Add photos, PDFs or documents — a whole folder at once if you like.",
+        "menu_remove": "Remove from the list",
+        "row_reading": "Reading…",
+        "row_fields": "{n} fields",
+        "row_one_field": "1 field",
+        "row_nothing": "No metadata",
+        "row_unsupported": "Not supported",
+        "row_not_read": "Not read",
+        "row_cleaned": "Cleaned",
+        "row_failed": "Not cleaned",
+        "row_left": "{n} left",
         "btn_clear": "Clear list",
         "empty_title": "Nothing here yet",
         "empty_body": "Add a photo, a PDF or an office document to see what it reveals.",
@@ -134,6 +157,29 @@ STRINGS: dict[str, dict[str, str]] = {
         "missing_tools": "Bulunamayan isteğe bağlı araçlar: {names}. Bazı biçimler (video, "
                          "bazı görseller) bunlar olmadan temizlenemez.",
         "sec_files": "DOSYALAR",
+        "filter_all": "Tümü",
+        "filter_revealing": "Açığa çıkaranlar",
+        "filter_cleaned": "Temizlenenler",
+        "filter_other": "Diğer",
+        "btn_limits": "Scrub'ın yapamadıkları",
+        "inspector_empty": "Sizin hakkınızda söylediği her şeyi görmek için bir dosya seçin.",
+        "inspector_none": "mat2 bu dosyada metadata bulamadı. Silinecek bir şey yok.",
+        "sec_other": "DİĞER ALANLAR",
+        "sec_result": "SONUÇ",
+        "mode_copy_short": "Orijinalleri koru",
+        "mode_replace_short": "Orijinallerin yerine koy",
+        "list_empty_title": "Dosyalarınız sizin hakkınızda ne anlatıyor?",
+        "list_empty_sub": "Fotoğraf, PDF ya da belge ekleyin — isterseniz bütün bir klasörü.",
+        "menu_remove": "Listeden çıkar",
+        "row_reading": "Okunuyor…",
+        "row_fields": "{n} alan",
+        "row_one_field": "1 alan",
+        "row_nothing": "Metadata yok",
+        "row_unsupported": "Desteklenmiyor",
+        "row_not_read": "Okunmadı",
+        "row_cleaned": "Temizlendi",
+        "row_failed": "Temizlenmedi",
+        "row_left": "{n} kaldı",
         "btn_clear": "Listeyi temizle",
         "empty_title": "Henüz bir şey yok",
         "empty_body": "Ne açığa çıkardığını görmek için bir fotoğraf, PDF ya da ofis belgesi "
@@ -223,6 +269,14 @@ def set_language(lang: str) -> None:
 
 def language() -> str:
     return _lang
+
+
+def upper(text: str) -> str:
+    """Upper case that is right for the current language: Turkish i → İ.
+    str.upper() turns "Kişisel" into "KIŞISEL", which is a different word."""
+    if _lang == "tr":
+        text = text.replace("i", "İ")
+    return text.upper()
 
 
 def t(key: str, /, **kw) -> str:

@@ -304,6 +304,31 @@ QLabel#warnline {{ color: #e6e6ea; font-size: 12px; font-weight: 600; }}
 QLabel#drop {{ color: #6f6f75; font-size: 11px; }}
 QWidget#trashrow {{ border-top: 1px solid rgba(255, 255, 255, 0.06); }}
 
+/* ── Maze Scrub: the workbench ──────────────────────────────────────── */
+QWidget#toolbar {{
+    background-color: rgba(0, 0, 0, 0.6);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}}
+QWidget#actionbar {{
+    background-color: rgba(0, 0, 0, 0.72);
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}}
+QWidget#inspector {{
+    background-color: rgba(0, 0, 0, 0.35);
+    border-left: 1px solid rgba(255, 255, 255, 0.06);
+}}
+QListView#filelist {{
+    background: transparent; border: none; outline: none; padding: 6px 2px;
+}}
+QSplitter::handle {{ background: transparent; width: 1px; }}
+QLabel#insp_name {{ font-size: 20px; font-weight: 800; letter-spacing: -0.3px; }}
+QLabel#cat_head {{ color: #e6e6ea; font-size: 10px; font-weight: bold; letter-spacing: 1.8px; }}
+QLabel#field_key {{ font-family: {mono}; color: #f2f2f4; font-size: 12px; font-weight: 600; }}
+QLabel#field_key_dim {{ font-family: {mono}; color: #6f6f75; font-size: 12px; }}
+QLabel#field_val {{ color: #d8d8dc; font-size: 12px; }}
+QLabel#field_val_dim {{ font-family: {mono}; color: #6f6f75; font-size: 12px; }}
+QLabel#empty_title {{ font-size: 22px; font-weight: 800; letter-spacing: -0.3px; }}
+
 QMessageBox {{ background-color: #0b0b0c; }}
 QMessageBox QLabel {{ color: {text}; }}
 """

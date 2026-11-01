@@ -1,12 +1,15 @@
-"""Main window: add files, see what they reveal, clean them.
+"""Main window: a workbench.
 
-Frameless with its own 50px title bar, like the rest of the Maze apps. The page
-is one column: the hero with the add buttons, the file list (each file with
-its fields grouped by what they give away), the action bar, and a plain list
-of what Scrub cannot do — said up front rather than discovered later.
+Scrub is used on a pile of files at once, so it is laid out like a tool for
+that rather than like a page: a toolbar across the top, the list of files on
+the left, an inspector on the right that shows everything the selected file
+gives away — grouped by what it reveals — and the cleaning controls in a bar
+along the bottom.
 
-All mat2 work runs in the worker pool; the page is rebuilt from `self.items`
-after every step, so the window never shows a state the engine did not report.
+The list is a model/view list painted by a delegate: thousands of files cost
+one row of paint each, not a widget each, and a file that finishes reading
+repaints its own row only. All mat2 work runs in the worker pool; the window
+never shows a state the engine did not report.
 """
 from __future__ import annotations
 
@@ -14,11 +17,15 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QSize, QTimer, Qt
-from PyQt6.QtGui import QKeySequence, QShortcut
-from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFileDialog, QFrame,
-                             QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-                             QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
+from PyQt6.QtCore import (QAbstractListModel, QEvent, QModelIndex, QRectF, QSize, QTimer,
+                          Qt)
+from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPainterPath,
+                         QPen, QShortcut)
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox,
+                             QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+                             QListView, QMainWindow, QMenu, QMessageBox, QPushButton,
+                             QScrollArea, QSplitter, QStackedWidget, QStyle,
+                             QStyledItemDelegate, QVBoxLayout, QWidget)
 
 from mazescrub import __version__
 from mazescrub.core import engine, settings
@@ -26,19 +33,16 @@ from mazescrub.core.engine import CleanResult, Report, ScrubError
 from mazescrub.gui import worker
 from mazescrub.gui.chrome import CopyButton, EdgeResizer, TitleBar, WindowButton, button, label
 from mazescrub.gui.glass import GlassBackground, GlassFrame
-from mazescrub.gui.glyphs import glyph, glyph_pixmap
-from mazescrub.gui.i18n import language, set_language, t
+from mazescrub.gui.glyphs import glyph_pixmap
+from mazescrub.gui.i18n import language, set_language, t, upper
 from mazescrub.gui.icons import app_logo, logo_pixmap
-from mazescrub.gui.pill import Pill
 
-_CONTENT_W = 980
-_MAX_ROWS = 200          # rows drawn; the rest are summarised in one line
-# While mat2 streams results in, the page is rebuilt at most this often (ms):
-# rebuilding hundreds of rows for every file would starve the event loop.
-_LIVE_RENDER_MS = 1000
+# While mat2 streams results in, changed rows are repainted at most this often.
+_LIVE_MS = 250
 
 _CAT_GLYPH = {"location": "pin", "person": "person", "device": "device",
               "time": "clock", "software": "code"}
+FILTERS = ("all", "revealing", "cleaned", "other")
 
 
 @dataclass
@@ -46,7 +50,6 @@ class Item:
     path: Path
     report: Report | None = None
     result: CleanResult | None = None
-    expanded: bool = False
 
     @property
     def cleanable(self) -> bool:
@@ -54,17 +57,19 @@ class Item:
         return bool(r and r.supported and r.fields
                     and not (self.result and self.result.ok))
 
+    def group(self) -> str:
+        """Which filter the file belongs to."""
+        if self.result and self.result.ok:
+            return "cleaned"
+        if self.report and self.report.supported and self.report.fields:
+            return "revealing"
+        return "other"
+
 
 def shown(text: str) -> str:
     """Text safe to hand to Qt. A file name that is not valid UTF-8 arrives
     as surrogate escapes, which a QString cannot hold."""
     return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
-
-
-def _elide(lb: QLabel, text: str, width: int) -> None:
-    text = shown(text)
-    lb.setText(lb.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, width))
-    lb.setToolTip(text)
 
 
 def _err_text(e: BaseException) -> str:
@@ -77,159 +82,181 @@ def _err_text(e: BaseException) -> str:
     return t("e_helper", detail=str(e)[:200])
 
 
-class FileRow(GlassFrame):
-    def __init__(self, item: Item, win: "MainWindow"):
-        super().__init__(radius=14, strength=1.1 if item.expanded else 1.0)
-        self.item, self.win = item, win
-        v = QVBoxLayout(self)
-        v.setContentsMargins(18, 12, 12, 12)
-        v.setSpacing(8)
-
-        top = QHBoxLayout()
-        top.setSpacing(10)
-        ic = QLabel()
-        ic.setPixmap(glyph_pixmap("file", 18, "#bdbdc2"))
-        top.addWidget(ic)
-        names = QVBoxLayout()
-        names.setSpacing(1)
-        names.addWidget(label(shown(item.path.name), "title"))
-        where = label("", "path")
-        _elide(where, str(item.path.parent), 420)
-        names.addWidget(where)
-        top.addLayout(names, 1)
-
-        r, res = item.report, item.result
-        if r and r.categories:
-            cats = ", ".join(t(f"cat_{c}") for c in r.categories)
-            names.addWidget(label(t("reveals", cats=cats),
-                                  "meta" if res and res.ok else "warnline"))
-        for cat in (r.categories if r else []):
-            chip = QLabel()
-            chip.setPixmap(glyph_pixmap(_CAT_GLYPH[cat], 15, "#e6e6ea"))
-            chip.setToolTip(t(f"cat_{cat}"))
-            top.addWidget(chip)
-        top.addSpacing(4)
-        top.addWidget(self._pill())
-
-        if r and r.supported and r.fields:
-            more = button(t("btn_hide") if item.expanded else t("btn_details"), "ghost")
-            more.clicked.connect(lambda: win.toggle(item))
-            top.addWidget(more)
-        rm = QPushButton(objectName="round")
-        rm.setIcon(glyph("x", 14, "#9a9aa0"))
-        rm.setIconSize(QSize(14, 14))
-        rm.setFixedSize(32, 32)
-        rm.setCursor(Qt.CursorShape.PointingHandCursor)
-        rm.setToolTip(t("tip_remove"))
-        rm.setEnabled(not win.busy)
-        rm.clicked.connect(lambda: win.remove(item))
-        self._rm = rm
-        top.addWidget(rm)
-        v.addLayout(top)
-
-        if r and not r.supported:
-            # The helper leaves `error` empty for "mat2 has no parser for this";
-            # anything else is a file it tried and failed to read.
-            text = (t("not_read") if r.error == "cancelled" else
-                    t("error_body", detail=shown(r.error)) if r.error else t("unsupported_body"))
-            v.addWidget(self._indent(label(text, "hint", wrap=True)))
-        if item.expanded and r and r.fields:
-            if res and res.ok:
-                v.addWidget(self._indent(label(t("found_before"), "field")))
-            v.addWidget(self._indent(self._fields(r)))
-        if res:
-            v.addWidget(self._indent(self._result(res)))
-
-    @staticmethod
-    def signature(item: Item) -> tuple:
-        """Everything a row draws, apart from the busy state. Same signature,
-        same pixels — so the row widget can be kept across renders."""
-        return (id(item.report), id(item.result), item.expanded, language())
-
-    def set_busy(self, busy: bool) -> None:
-        self._rm.setEnabled(not busy)
-
-    def _indent(self, w: QWidget) -> QWidget:
-        box = QWidget()
-        h = QHBoxLayout(box)
-        h.setContentsMargins(28, 0, 8, 0)
-        h.addWidget(w, 1)
-        return box
-
-    def _pill(self) -> Pill:
-        r, res = self.item.report, self.item.result
-        if res:
-            return Pill(t("pill_cleaned"), "update") if res.ok else Pill(t("pill_failed"), "busy")
-        if r is None:
-            return Pill(t("pill_scanning"), "busy")
-        if not r.supported:
-            if r.error == "cancelled":
-                return Pill(t("pill_stopped"), "local")
-            return Pill(t("pill_error") if r.error else t("pill_unsupported"), "local")
-        if not r.fields:
-            return Pill(t("pill_none"), "installed")
-        n = len(r.fields)
-        return Pill(t("pill_one_field") if n == 1 else t("pill_fields", n=n), "chip")
-
-    def _fields(self, r: Report) -> QWidget:
-        box = QWidget()
-        g = QGridLayout(box)
-        g.setContentsMargins(0, 4, 0, 4)
-        g.setHorizontalSpacing(16)
-        g.setVerticalSpacing(3)
-        # What gives the user away first, then the rest.
-        order = {c: i for i, c in enumerate(engine.CATEGORIES)}
-        fields = sorted(r.fields, key=lambda f: order.get(f.category, 99))
-        for row, f in enumerate(fields[:400]):
-            k = label(shown(f.key), "mono")
-            val = label(shown(f.value), "body" if f.category else "mono", wrap=True)
-            val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            if f.category:
-                k.setStyleSheet("color: #f2f2f4; font-weight: 600;")
-                k.setToolTip(t(f"cat_{f.category}"))
-            g.addWidget(k, row, 0, Qt.AlignmentFlag.AlignTop)
-            g.addWidget(val, row, 1)
-        g.setColumnStretch(1, 1)
-        return box
-
-    def _result(self, res: CleanResult) -> QWidget:
-        lines: list[tuple[str, str]] = []
-        name = shown(res.output.name) if res.output else ""
-        if res.ok and res.replaced:
-            lines.append((t("res_replaced"), "meta"))
-        elif res.ok and not res.error:
-            lines.append((t("res_copy", name=name), "meta"))
-        if res.error:
-            lines.append((t(f"e_{res.error}", name=name), "warnline"))
+def row_state(item: Item) -> tuple[str, str]:
+    """(status text, pill style) for a row."""
+    r, res = item.report, item.result
+    if res is not None:
         if res.ok:
-            original = self.item.report.fields if self.item.report else []
-            kept, rewritten = engine.split_remaining(original, res.remaining)
+            kept, _ = engine.split_remaining(r.fields if r else [], res.remaining)
+            return (t("row_left", n=len(kept)) if kept else t("row_cleaned")), "solid"
+        return t("row_failed"), "dashed"
+    if r is None:
+        return t("row_reading"), "dashed"
+    if not r.supported:
+        return (t("row_not_read") if r.error == "cancelled" else t("row_unsupported")), "dim"
+    if not r.fields:
+        return t("row_nothing"), "dim"
+    n = len(r.fields)
+    return (t("row_one_field") if n == 1 else t("row_fields", n=n)), "outline"
 
-            def keys(fields) -> str:
-                text = ", ".join(shown(f.key) for f in fields[:8])
-                return text + (", …" if len(fields) > 8 else "")
-            if kept:
-                lines.append((t("res_left", keys=keys(kept)), "warnline"))
-            if rewritten:
-                lines.append((t("res_rewritten", keys=keys(rewritten)), "hint"))
-            if not res.remaining:
-                lines.append((t("res_none_left"), "hint"))
-        box = QWidget()
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(3)
-        for text, style in lines:
-            lay.addWidget(label(text, style, wrap=True))
-        return box
 
+# ── the list ─────────────────────────────────────────────────────────────────
+
+class FileModel(QAbstractListModel):
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        self.keys: list[str] = []
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.keys)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or index.row() >= len(self.keys):
+            return None
+        item = self.win.items.get(self.keys[index.row()])
+        if role == Qt.ItemDataRole.UserRole:
+            return item
+        if role == Qt.ItemDataRole.DisplayRole and item is not None:
+            return shown(item.path.name)
+        if role == Qt.ItemDataRole.ToolTipRole and item is not None:
+            return shown(str(item.path))
+        return None
+
+    def rebuild(self, keys: list[str]) -> None:
+        self.beginResetModel()
+        self.keys = keys
+        self.endResetModel()
+
+    def touch(self, keys: set[str]) -> None:
+        for row, k in enumerate(self.keys):
+            if k in keys:
+                idx = self.index(row)
+                self.dataChanged.emit(idx, idx)
+
+
+class RowDelegate(QStyledItemDelegate):
+    H = 54
+
+    def sizeHint(self, option, index) -> QSize:
+        return QSize(option.rect.width(), self.H)
+
+    def paint(self, p: QPainter, option, index) -> None:
+        item: Item | None = index.data(Qt.ItemDataRole.UserRole)
+        if item is None:
+            return
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(option.rect).adjusted(8, 2, -8, -2)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        if selected or hover:
+            path = QPainterPath()
+            path.addRoundedRect(r, 10, 10)
+            p.fillPath(path, QColor(255, 255, 255, 26 if selected else 10))
+            if selected:
+                p.setPen(QPen(QColor(255, 255, 255, 50), 1))
+                p.drawPath(path)
+
+        text, style = row_state(item)
+        bright = item.group() == "revealing"
+        icon = glyph_pixmap("file", 18, "#f2f2f4" if bright else "#7d7d83")
+        p.drawPixmap(int(r.left() + 12), int(r.center().y() - 9), icon)
+
+        # Pill on the right.
+        pf = QFont(option.font)
+        pf.setPixelSize(10)
+        pf.setBold(True)
+        pf.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
+        pm = QFontMetrics(pf)
+        ptxt = upper(text)
+        pw = pm.horizontalAdvance(ptxt) + 18
+        pill = QRectF(r.right() - pw - 10, r.center().y() - 10, pw, 20)
+        pp = QPainterPath()
+        pp.addRoundedRect(pill, 10, 10)
+        if style == "solid":
+            p.fillPath(pp, QColor("#f2f2f4"))
+            fg = QColor("#000000")
+        else:
+            pen = QPen(QColor(255, 255, 255, 120 if style == "outline" else 50), 1)
+            if style == "dashed":
+                pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawPath(pp)
+            fg = QColor("#e6e6ea" if style == "outline" else "#8a8a90")
+        p.setFont(pf)
+        p.setPen(fg)
+        p.drawText(pill, Qt.AlignmentFlag.AlignCenter, ptxt)
+
+        # Category glyphs left of the pill.
+        x = pill.left() - 8
+        cats = item.report.categories if item.report else []
+        for cat in reversed(cats):
+            x -= 16
+            p.drawPixmap(int(x), int(r.center().y() - 7),
+                         glyph_pixmap(_CAT_GLYPH[cat], 14,
+                                      "#e6e6ea" if not (item.result and item.result.ok)
+                                      else "#5f5f65"))
+        text_right = x - 10
+
+        # Name and folder.
+        left = r.left() + 42
+        width = max(20, int(text_right - left))
+        nf = QFont(option.font)
+        nf.setPixelSize(13)
+        nf.setBold(True)
+        p.setFont(nf)
+        p.setPen(QColor("#f2f2f4" if bright or selected else "#c4c4ca"))
+        name = QFontMetrics(nf).elidedText(shown(item.path.name),
+                                           Qt.TextElideMode.ElideMiddle, width)
+        p.drawText(QRectF(left, r.top() + 8, width, 18),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+        sf = QFont(option.font)
+        sf.setPixelSize(11)
+        p.setFont(sf)
+        p.setPen(QColor("#6f6f75"))
+        folder = QFontMetrics(sf).elidedText(shown(str(item.path.parent)),
+                                             Qt.TextElideMode.ElideMiddle, width)
+        p.drawText(QRectF(left, r.top() + 27, width, 16),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, folder)
+        p.restore()
+
+
+class LimitsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("sec_limits"))
+        self.setStyleSheet("QDialog { background-color: #0b0b0c; }")
+        self.setMinimumWidth(520)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 22, 24, 20)
+        v.setSpacing(10)
+        v.addWidget(label(t("sec_limits"), "section"))
+        for key in ("limit_content", "limit_pdf", "limit_images", "limit_identity"):
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            ic = QLabel()
+            ic.setPixmap(glyph_pixmap("point", 14, "#8f8f95"))
+            row.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
+            row.addWidget(label(t(key), "body", wrap=True), 1)
+            v.addLayout(row)
+        ok = button("OK", "secondary")
+        ok.clicked.connect(self.accept)
+        r = QHBoxLayout()
+        r.addStretch(1)
+        r.addWidget(ok)
+        v.addLayout(r)
+
+
+# ── the window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Maze Scrub")
         self.setWindowIcon(app_logo())
-        self.resize(1080, 860)
-        self.setMinimumSize(720, 560)
+        self.resize(1200, 800)
+        self.setMinimumSize(860, 560)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAcceptDrops(True)
         self._resizer = EdgeResizer(self)
@@ -239,22 +266,25 @@ class MainWindow(QMainWindow):
         self.mode: str = prefs["mode"]
         self.lightweight: bool = prefs["lightweight"]
         self.items: dict[str, Item] = {}
+        self.filter = "all"
+        self.selected: str | None = None
         self.busy = False
         self.mat2 = engine.Mat2Status(False, reason="checking")
         self._progress = ""
         self._progress_kind = "read"
         self._cancel = threading.Event()
         self._stopped = False        # the user pressed Stop: do not resume on our own
-        self._render_timer = QTimer(self, singleShot=True)
-        self._render_timer.timeout.connect(self._render)
+        self._dirty: set[str] = set()
+        self._live = QTimer(self, singleShot=True, interval=_LIVE_MS)
+        self._live.timeout.connect(self._flush_live)
 
-        self._rows: dict[str, tuple[tuple, FileRow]] = {}
-        self._sections: dict[str, QWidget] = {}
+        self.model = FileModel(self)
         self._build_chrome()
-        self._render()
+        self.refresh()
         self.check_mat2()
         QShortcut(QKeySequence("Ctrl+Q"), self, activated=self.close)
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.add_files)
+        QShortcut(QKeySequence("Delete"), self, activated=self.remove_selected)
 
     # ── chrome ─────────────────────────────────────────────────────────────
     def _build_chrome(self) -> None:
@@ -294,12 +324,30 @@ class MainWindow(QMainWindow):
             h.addWidget(b)
         v.addWidget(header)
 
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.viewport().setAutoFillBackground(False)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        v.addWidget(self._scroll, 1)
+        v.addWidget(self._build_toolbar())
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.setChildrenCollapsible(False)
+        split.setHandleWidth(1)
+        split.addWidget(self._build_list_pane())
+        self._inspector = QWidget(objectName="inspector")
+        self._inspector.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        il = QVBoxLayout(self._inspector)
+        il.setContentsMargins(0, 0, 0, 0)
+        self._insp_scroll = QScrollArea()
+        self._insp_scroll.setWidgetResizable(True)
+        self._insp_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._insp_scroll.viewport().setAutoFillBackground(False)
+        self._insp_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        il.addWidget(self._insp_scroll)
+        split.addWidget(self._inspector)
+        split.setSizes([520, 680])
+        v.addWidget(split, 1)
+
+        self._actionbar = QWidget(objectName="actionbar")
+        self._actionbar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        v.addWidget(self._actionbar)
+        self._build_actionbar()
 
         footer = QWidget(objectName="footer")
         footer.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -314,6 +362,108 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self._flash_timer = QTimer(self, singleShot=True, interval=9000)
         self._flash_timer.timeout.connect(self._update_status)
+
+    def _build_toolbar(self) -> QWidget:
+        bar = QWidget(objectName="toolbar")
+        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        bar.setFixedHeight(56)
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(16, 0, 16, 0)
+        h.setSpacing(8)
+        self._add_btn = button(t("btn_add_files"), "get", "add_files")
+        self._add_btn.clicked.connect(self.add_files)
+        self._folder_btn = button(t("btn_add_folder"), "secondary", "folder")
+        self._folder_btn.clicked.connect(self.add_folder)
+        self._stop_btn = button(t("btn_stop"), "secondary", "x")
+        self._stop_btn.clicked.connect(self.stop)
+        for b in (self._add_btn, self._folder_btn, self._stop_btn):
+            h.addWidget(b)
+        sep = QFrame(objectName="vline")
+        sep.setFixedSize(1, 22)
+        h.addSpacing(8)
+        h.addWidget(sep)
+        h.addSpacing(8)
+        self._filter_btns: dict[str, QPushButton] = {}
+        for f in FILTERS:
+            b = QPushButton(objectName="seg")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, x=f: self.set_filter(x))
+            self._filter_btns[f] = b
+            h.addWidget(b)
+        h.addStretch(1)
+        lim = button(t("btn_limits"), "ghost", "warn")
+        lim.clicked.connect(lambda: LimitsDialog(self).exec())
+        h.addWidget(lim)
+        self._clear_btn = button(t("btn_clear"), "ghost", "trash")
+        self._clear_btn.clicked.connect(self.clear)
+        h.addWidget(self._clear_btn)
+        return bar
+
+    def _build_list_pane(self) -> QWidget:
+        self._list_stack = QStackedWidget()
+        # Page 0: the empty state, which is also the welcome.
+        empty = QWidget()
+        ev = QVBoxLayout(empty)
+        ev.setContentsMargins(36, 30, 36, 30)
+        ev.addStretch(1)
+        ic = QLabel()
+        ic.setPixmap(glyph_pixmap("drop", 46, "#8f8f95"))
+        ev.addWidget(ic, 0, Qt.AlignmentFlag.AlignHCenter)
+        ev.addSpacing(8)
+        title = label(t("list_empty_title"), "empty_title", wrap=True)
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        ev.addWidget(title)
+        sub = label(t("list_empty_sub"), "tagline", wrap=True)
+        sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        ev.addWidget(sub)
+        ev.addSpacing(6)
+        hint = label(t("drop_hint"), "drop", wrap=True)
+        hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        ev.addWidget(hint)
+        ev.addStretch(1)
+        self._list_stack.addWidget(empty)
+        # Page 1: the list.
+        self._list = QListView(objectName="filelist")
+        self._list.setModel(self.model)
+        self._list.setItemDelegate(RowDelegate(self._list))
+        self._list.setUniformItemSizes(True)
+        self._list.setMouseTracking(True)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._context_menu)
+        self._list.selectionModel().currentChanged.connect(self._on_current)
+        self._list_stack.addWidget(self._list)
+        return self._list_stack
+
+    def _build_actionbar(self) -> None:
+        old = self._actionbar.layout()
+        if old is not None:
+            QWidget().setLayout(old)          # detach and drop the old layout
+        h = QHBoxLayout(self._actionbar)
+        h.setContentsMargins(20, 12, 20, 12)
+        h.setSpacing(14)
+        seg = QHBoxLayout()
+        seg.setSpacing(4)
+        self._mode_btns = {}
+        for mode, key in (("copy", "mode_copy_short"), ("replace", "mode_replace_short")):
+            b = QPushButton(t(key), objectName="seg_on" if self.mode == mode else "seg")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, m=mode: self.set_mode(m))
+            self._mode_btns[mode] = b
+            seg.addWidget(b)
+        h.addLayout(seg)
+        self._mode_hint = label(t("mode_copy_hint" if self.mode == "copy" else
+                                  "mode_replace_hint"), "hint", wrap=True)
+        h.addWidget(self._mode_hint, 1)
+        self._light = QCheckBox(t("lightweight"))
+        self._light.setChecked(self.lightweight)
+        self._light.setToolTip(t("lightweight_hint"))
+        self._light.toggled.connect(self.set_lightweight)
+        h.addWidget(self._light)
+        self._clean_btn = button(t("btn_clean_none"), "get_lg", "scrub", icon_color="#000000")
+        self._clean_btn.clicked.connect(self.clean)
+        h.addWidget(self._clean_btn)
 
     def changeEvent(self, ev) -> None:
         if ev.type() == QEvent.Type.WindowStateChange:
@@ -330,18 +480,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._rebuild)
 
     def _rebuild(self) -> None:
-        self._rows.clear()
-        self._sections.clear()
         self._build_chrome()
-        self._render()
-
-    def schedule_render(self, delay: int = 0) -> None:
-        """Rebuild the page from the event loop, never from inside a slot of a
-        widget that the rebuild deletes. Calls inside `delay` coalesce."""
-        if delay == 0:
-            self._render_timer.start(0)
-        elif not self._render_timer.isActive():
-            self._render_timer.start(delay)
+        self.refresh()
 
     def closeEvent(self, ev) -> None:
         # Stop the helpers now; the app waits for the pool before exiting, and
@@ -374,7 +514,7 @@ class MainWindow(QMainWindow):
     def check_mat2(self) -> None:
         def done(st: engine.Mat2Status) -> None:
             self.mat2 = st
-            self.schedule_render()
+            self.refresh()
             self._inspect_pending()
         worker.run(engine.status, on_done=done,
                    on_fail=lambda e: done(engine.Mat2Status(False, reason="helper")),
@@ -382,15 +522,11 @@ class MainWindow(QMainWindow):
 
     # ── adding ─────────────────────────────────────────────────────────────
     def add_files(self) -> None:
-        if self.busy:
-            return
         files, _ = QFileDialog.getOpenFileNames(self, t("btn_add_files"), str(Path.home()))
         if files:
             self.add_paths(files)
 
     def add_folder(self) -> None:
-        if self.busy:
-            return
         d = QFileDialog.getExistingDirectory(self, t("btn_add_folder"), str(Path.home()))
         if d:
             self.add_paths([d])
@@ -406,7 +542,7 @@ class MainWindow(QMainWindow):
                 if item.report is not None and item.report.error == "cancelled":
                     item.report = None          # added again after a Stop: read it now
             self._stopped = False
-            self.schedule_render()
+            self.refresh()
             if truncated:
                 self.flash(t("status_truncated", n=engine.MAX_FILES))
             self._inspect_pending()
@@ -444,7 +580,7 @@ class MainWindow(QMainWindow):
                                   progress=lambda d, n: progress("count", d, n))
         worker.run(job, on_done=done, on_fail=fail, on_progress=self._on_progress,
                    with_progress=True, critical=False)
-        self.schedule_render()
+        self._update_controls()
 
     def _on_progress(self, v: tuple) -> None:
         """One file finished (in the pool) — show it without waiting for the rest."""
@@ -452,23 +588,37 @@ class MainWindow(QMainWindow):
             return
         if v[0] == "item":
             obj = v[1]
-            item = self.items.get(str(obj.path))
+            key = str(obj.path)
+            item = self.items.get(key)
             if item is not None:
                 if isinstance(obj, Report):
                     item.report = obj
                 else:
                     item.result = obj
-            self.schedule_render(_LIVE_RENDER_MS)
+                self._dirty.add(key)
+                if not self._live.isActive():
+                    self._live.start()
         elif v[0] == "count":
             _kind, done_n, total, *_ = v
             key = "cleaning" if self._progress_kind == "clean" else "reading"
             self._progress = t(key, done=done_n, total=total)
             self._update_status()
 
+    def _flush_live(self) -> None:
+        """Repaint the rows that changed; leave the rest of the window alone."""
+        dirty, self._dirty = self._dirty, set()
+        if self.filter != "all":
+            self.refresh()               # a row may now belong to another filter
+            return
+        self.model.touch(dirty)
+        if self.selected in dirty:
+            self._render_inspector()
+        self._update_controls()
+
     def _finish(self) -> None:
         self.busy = False
         self._progress = ""
-        self.schedule_render()
+        self.refresh()
         # Files dropped while reading wait for the next pass — unless the user
         # stopped, or the window is closing.
         if (not self._stopped and not self._cancel.is_set()
@@ -476,23 +626,59 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._inspect_pending)
 
     # ── list actions ───────────────────────────────────────────────────────
-    def toggle(self, item: Item) -> None:
-        item.expanded = not item.expanded
-        self.schedule_render()
+    def select(self, item: Item) -> None:
+        key = str(item.path)
+        if key in self.model.keys:
+            self._list.setCurrentIndex(self.model.index(self.model.keys.index(key)))
+        self.selected = key
+        self._render_inspector()
+
+    def _on_current(self, current: QModelIndex, _prev: QModelIndex) -> None:
+        self.selected = self.model.keys[current.row()] if current.isValid() else None
+        self._render_inspector()
+
+    def _context_menu(self, pos) -> None:
+        idx = self._list.indexAt(pos)
+        if not idx.isValid() or self.busy:
+            return
+        m = QMenu(self)
+        a = m.addAction(t("menu_remove"))
+        key = self.model.keys[idx.row()]
+        a.triggered.connect(lambda: self.remove_key(key))
+        m.exec(self._list.viewport().mapToGlobal(pos))
+
+    def remove_selected(self) -> None:
+        if self.selected and not self.busy:
+            self.remove_key(self.selected)
+
+    def remove_key(self, key: str) -> None:
+        if not self.busy:
+            self.items.pop(key, None)
+            if self.selected == key:
+                self.selected = None
+            self.refresh()
 
     def remove(self, item: Item) -> None:
-        if not self.busy:
-            self.items.pop(str(item.path), None)
-            self.schedule_render()
+        self.remove_key(str(item.path))
 
     def clear(self) -> None:
         if not self.busy:
             self.items.clear()
-            self.schedule_render()
+            self.selected = None
+            self.refresh()
+
+    def set_filter(self, f: str) -> None:
+        self.filter = f
+        self.refresh()
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode
         settings.save(mode=mode)
+        for m, b in self._mode_btns.items():
+            b.setObjectName("seg_on" if m == mode else "seg")
+            b.style().unpolish(b)
+            b.style().polish(b)
+        self._mode_hint.setText(t("mode_copy_hint" if mode == "copy" else "mode_replace_hint"))
 
     def set_lightweight(self, on: bool) -> None:
         self.lightweight = on
@@ -540,7 +726,7 @@ class MainWindow(QMainWindow):
                                 progress=lambda d, n: progress("count", d, n))
         worker.run(job, on_done=done, on_fail=fail, on_progress=self._on_progress,
                    with_progress=True)
-        self.schedule_render()
+        self._update_controls()
 
     # ── drag & drop ────────────────────────────────────────────────────────
     def dragEnterEvent(self, ev) -> None:
@@ -554,130 +740,184 @@ class MainWindow(QMainWindow):
             ev.acceptProposedAction()
             QTimer.singleShot(0, lambda: self.add_paths(paths))
 
-    # ── page ───────────────────────────────────────────────────────────────
-    def _build_page(self) -> None:
-        """The persistent page: one column of named slots. Renders swap the
-        small sections and reuse file rows, instead of rebuilding hundreds
-        of widgets every second while a big folder streams in."""
-        page = QWidget()
-        outer = QHBoxLayout(page)
-        outer.setContentsMargins(24, 24, 24, 28)
-        outer.addStretch(1)
-        col = QWidget()
-        col.setMaximumWidth(_CONTENT_W)
-        self._col = QVBoxLayout(col)
-        self._col.setContentsMargins(0, 0, 0, 0)
-        self._col.setSpacing(14)
-        outer.addWidget(col, 100)
-        outer.addStretch(1)
-        for name in ("hero", "notice", "header", "empty"):
-            self._sections[name] = QWidget()
-            self._sections[name].hide()
-            self._col.addWidget(self._sections[name])
-        rows = QWidget()
-        self._rows_layout = QVBoxLayout(rows)
-        self._rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._rows_layout.setSpacing(10)
-        self._col.addWidget(rows)
-        for name in ("more", "actions", "limits"):
-            self._sections[name] = QWidget()
-            self._sections[name].hide()
-            self._col.addWidget(self._sections[name])
-        self._col.addStretch(1)
-        self._scroll.setWidget(page)
+    # ── refresh ────────────────────────────────────────────────────────────
+    def visible_keys(self) -> list[str]:
+        if self.filter == "all":
+            return list(self.items)
+        return [k for k, i in self.items.items() if i.group() == self.filter]
 
-    def _swap(self, name: str, widget: QWidget | None) -> None:
-        """Put `widget` in slot `name`; None leaves the slot empty and hidden,
-        so it adds no spacing."""
-        empty = widget is None
-        widget = widget or QWidget()
-        old = self._sections[name]
-        self._col.replaceWidget(old, widget)
-        old.hide()
-        old.deleteLater()            # never delete synchronously: see schedule_render
-        self._sections[name] = widget
-        widget.setVisible(not empty)
+    def refresh(self) -> None:
+        """Rebuild the list and everything that depends on it. Cheap: the list
+        is a model, so this costs nothing per row until rows are painted."""
+        keys = self.visible_keys()
+        keep = self.selected
+        self._dirty.clear()              # the rebuild repaints every row anyway
+        self.model.rebuild(keys)
+        self._list_stack.setCurrentIndex(1 if self.items else 0)
+        if keep in keys:
+            self._list.setCurrentIndex(self.model.index(keys.index(keep)))
+        elif keys and self.selected is None:
+            self.selected = keys[0]
+            self._list.setCurrentIndex(self.model.index(0))
+        self._render_inspector()
+        self._update_controls()
 
-    def _render(self) -> None:
-        self._render_timer.stop()
-        if not self._sections:
-            self._build_page()
-
-        self._swap("hero", self._hero())
-        notice = None
-        if not self.mat2.available and self.mat2.reason != "checking":
-            notice = self._no_mat2()
-        elif self.mat2.missing:
-            notice = label(t("missing_tools", names=", ".join(self.mat2.missing)),
-                           "hint", wrap=True)
-        self._swap("notice", notice)
-        header = QWidget()
-        header.setLayout(self._files_header())
-        self._swap("header", header)
-        self._swap("empty", None if self.items else self._empty())
-        self._render_rows()
-        extra = len(self.items) - _MAX_ROWS
-        self._swap("more", label(f"+ {extra}", "meta") if extra > 0 else None)
-        self._swap("actions", self._action_bar() if self.items else None)
-        if self._sections["limits"].layout() is None:
-            self._swap("limits", self._limits())
+    def _update_controls(self) -> None:
+        counts = {f: 0 for f in FILTERS}
+        for i in self.items.values():
+            counts["all"] += 1
+            counts[i.group()] += 1
+        names = {"all": "filter_all", "revealing": "filter_revealing",
+                 "cleaned": "filter_cleaned", "other": "filter_other"}
+        for f, b in self._filter_btns.items():
+            b.setText(f"{t(names[f])}  {counts[f]}")
+            b.setObjectName("seg_on" if self.filter == f else "seg")
+            b.style().unpolish(b)
+            b.style().polish(b)
+            b.setVisible(bool(self.items))
+        self._stop_btn.setVisible(self.busy)
+        self._stop_btn.setEnabled(not self._stopped)
+        self._clear_btn.setEnabled(bool(self.items) and not self.busy)
+        n = sum(1 for i in self.items.values() if i.cleanable)
+        self._clean_btn.setText(t("btn_clean_none") if n == 0 else
+                                t("btn_clean_one") if n == 1 else t("btn_clean", n=n))
+        self._clean_btn.setEnabled(n > 0 and not self.busy and self.mat2.available)
+        for b in self._mode_btns.values():
+            b.setEnabled(not self.busy)
+        self._light.setEnabled(not self.busy)
+        self._add_btn.setEnabled(self.mat2.available or self.mat2.reason == "checking")
+        self._folder_btn.setEnabled(self._add_btn.isEnabled())
         self._update_status()
 
-    def _render_rows(self) -> None:
-        wanted = list(self.items.values())[:_MAX_ROWS]
-        keep: dict[str, tuple[tuple, FileRow]] = {}
-        for item in wanted:
-            key = str(item.path)
-            sig = FileRow.signature(item)
-            cached = self._rows.get(key)
-            if cached and cached[0] == sig:
-                row = cached[1]
-                row.set_busy(self.busy)
-            else:
-                row = FileRow(item, self)
-            keep[key] = (sig, row)
-        for key, (_sig, row) in self._rows.items():
-            if keep.get(key, (None, None))[1] is not row:
-                row.hide()
-                row.deleteLater()
-        # Re-seat in list order; taking a widget out of a layout is cheap.
-        while self._rows_layout.count():
-            self._rows_layout.takeAt(0)
-        for _sig, row in keep.values():
-            self._rows_layout.addWidget(row)
-            row.show()
-        self._rows = keep
-
-    def _hero(self) -> QWidget:
-        hero = GlassFrame(radius=22, tint="#ffffff", strength=1.2)
-        v = QVBoxLayout(hero)
-        v.setContentsMargins(32, 28, 32, 28)
+    # ── inspector ──────────────────────────────────────────────────────────
+    def _render_inspector(self) -> None:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(28, 24, 28, 24)
         v.setSpacing(10)
-        v.addWidget(label(t("eyebrow"), "eyebrow"))
-        v.addWidget(label(t("hero_title"), "hero_title", wrap=True))
-        v.addWidget(label(t("hero_sub"), "hero_sub", wrap=True))
+        if not self.mat2.available and self.mat2.reason != "checking":
+            v.addWidget(self._no_mat2())
+        elif self.mat2.missing:
+            v.addWidget(label(t("missing_tools", names=", ".join(self.mat2.missing)),
+                              "hint", wrap=True))
+        item = self.items.get(self.selected or "")
+        if item is None:
+            if self.items:
+                v.addStretch(1)
+                msg = label(t("inspector_empty"), "tagline", wrap=True)
+                msg.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+                v.addWidget(msg)
+            v.addStretch(1)
+        else:
+            self._inspect_item(v, item)
+            v.addStretch(1)
+        old = self._insp_scroll.takeWidget()
+        self._insp_scroll.setWidget(page)
+        if old is not None:
+            old.deleteLater()
+
+    def _inspect_item(self, v: QVBoxLayout, item: Item) -> None:
+        name = label(shown(item.path.name), "insp_name", wrap=True)
+        v.addWidget(name)
+        where = label(shown(str(item.path.parent)), "path", wrap=True)
+        v.addWidget(where)
+        r, res = item.report, item.result
+        if r and r.categories:
+            v.addSpacing(4)
+            cats = ", ".join(t(f"cat_{c}") for c in r.categories)
+            v.addWidget(label(t("reveals", cats=cats),
+                              "meta" if res and res.ok else "warnline", wrap=True))
         v.addSpacing(8)
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        add = button(t("btn_add_files"), "get_lg", "add_files")
-        add.clicked.connect(self.add_files)
-        fold = button(t("btn_add_folder"), "secondary_lg", "folder")
-        fold.clicked.connect(self.add_folder)
-        for b in (add, fold):
-            b.setEnabled(not self.busy)
-            row.addWidget(b)
-        di = QLabel()
-        di.setPixmap(glyph_pixmap("drop", 14, "#6f6f75"))
-        row.addSpacing(8)
-        row.addWidget(di)
-        row.addWidget(label(t("drop_hint"), "drop"), 1)
-        v.addLayout(row)
-        return hero
+
+        if r is None:
+            v.addWidget(label(t("row_reading"), "tagline"))
+            return
+        if not r.supported:
+            text = (t("not_read") if r.error == "cancelled" else
+                    t("error_body", detail=shown(r.error)) if r.error else t("unsupported_body"))
+            v.addWidget(label(text, "tagline", wrap=True))
+            return
+        if not r.fields:
+            v.addWidget(label(t("inspector_none"), "tagline", wrap=True))
+            return
+
+        if res is not None:
+            v.addWidget(self._result_box(item))
+            v.addSpacing(6)
+            if res.ok:
+                v.addWidget(label(t("found_before"), "field"))
+
+        groups: dict[str, list] = {c: [] for c in (*engine.CATEGORIES, "")}
+        for f in r.fields:
+            groups[f.category].append(f)
+        for cat in (*engine.CATEGORIES, ""):
+            fields = groups[cat]
+            if not fields:
+                continue
+            head = QHBoxLayout()
+            head.setSpacing(8)
+            if cat:
+                ic = QLabel()
+                ic.setPixmap(glyph_pixmap(_CAT_GLYPH[cat], 15, "#e6e6ea"))
+                head.addWidget(ic)
+                head.addWidget(label(upper(t(f"cat_{cat}")), "cat_head"))
+            else:
+                head.addWidget(label(t("sec_other"), "section"))
+            head.addWidget(label(str(len(fields)), "meta"))
+            head.addStretch(1)
+            v.addSpacing(8)
+            v.addLayout(head)
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(18)
+            grid.setVerticalSpacing(4)
+            grid.setContentsMargins(23 if cat else 0, 2, 0, 0)
+            for row, f in enumerate(fields[:400]):
+                k = label(shown(f.key), "field_key" if cat else "field_key_dim")
+                # One key column width for every group, so values line up
+                # down the whole inspector, not just within one category.
+                k.setFixedWidth(180)
+                k.setText(k.fontMetrics().elidedText(shown(f.key), Qt.TextElideMode.ElideMiddle, 176))
+                k.setToolTip(shown(f.key))
+                val = label(shown(f.value), "field_val" if cat else "field_val_dim", wrap=True)
+                val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                grid.addWidget(k, row, 0, Qt.AlignmentFlag.AlignTop)
+                grid.addWidget(val, row, 1)
+            grid.setColumnStretch(1, 1)
+            v.addLayout(grid)
+
+    def _result_box(self, item: Item) -> QWidget:
+        res = item.result
+        box = GlassFrame(radius=14, strength=1.3 if res.ok else 1.0)
+        v = QVBoxLayout(box)
+        v.setContentsMargins(16, 12, 16, 12)
+        v.setSpacing(4)
+        v.addWidget(label(t("sec_result"), "section"))
+        name = shown(res.output.name) if res.output else ""
+        if res.ok and res.replaced:
+            v.addWidget(label(t("res_replaced"), "body", wrap=True))
+        elif res.ok and not res.error:
+            v.addWidget(label(t("res_copy", name=name), "body", wrap=True))
+        if res.error:
+            v.addWidget(label(t(f"e_{res.error}", name=name), "warnline", wrap=True))
+        if res.ok:
+            original = item.report.fields if item.report else []
+            kept, rewritten = engine.split_remaining(original, res.remaining)
+
+            def keys(fields) -> str:
+                text = ", ".join(shown(f.key) for f in fields[:8])
+                return text + (", …" if len(fields) > 8 else "")
+            if kept:
+                v.addWidget(label(t("res_left", keys=keys(kept)), "warnline", wrap=True))
+            if rewritten:
+                v.addWidget(label(t("res_rewritten", keys=keys(rewritten)), "hint", wrap=True))
+            if not res.remaining:
+                v.addWidget(label(t("res_none_left"), "hint", wrap=True))
+        return box
 
     def _no_mat2(self) -> QWidget:
         box = GlassFrame(radius=16, strength=1.3)
         v = QVBoxLayout(box)
-        v.setContentsMargins(22, 18, 22, 18)
+        v.setContentsMargins(20, 16, 20, 16)
         v.setSpacing(10)
         head = QHBoxLayout()
         ic = QLabel()
@@ -700,83 +940,4 @@ class MainWindow(QMainWindow):
         r.addWidget(again)
         r.addStretch(1)
         v.addLayout(r)
-        return box
-
-    def _files_header(self) -> QHBoxLayout:
-        h = QHBoxLayout()
-        h.addWidget(label(t("sec_files"), "section"))
-        h.addStretch(1)
-        if self.busy:
-            stop = button(t("btn_stop"), "secondary", "x")
-            stop.setEnabled(not self._stopped)
-            stop.clicked.connect(self.stop)
-            h.addWidget(stop)
-        if self.items:
-            c = button(t("btn_clear"), "ghost", "trash")
-            c.setEnabled(not self.busy)
-            c.clicked.connect(self.clear)
-            h.addWidget(c)
-        return h
-
-    def _empty(self) -> QWidget:
-        box = GlassFrame(radius=16)
-        v = QVBoxLayout(box)
-        v.setContentsMargins(24, 26, 24, 26)
-        v.setSpacing(6)
-        v.addWidget(label(t("empty_title"), "card_title"), 0, Qt.AlignmentFlag.AlignHCenter)
-        v.addWidget(label(t("empty_body"), "tagline"), 0, Qt.AlignmentFlag.AlignHCenter)
-        return box
-
-    def _action_bar(self) -> QWidget:
-        box = GlassFrame(radius=18, strength=1.2)
-        h = QHBoxLayout(box)
-        h.setContentsMargins(24, 18, 24, 18)
-        h.setSpacing(24)
-
-        opts = QVBoxLayout()
-        opts.setSpacing(4)
-        group = QButtonGroup(box)
-        for mode, key in (("copy", "mode_copy"), ("replace", "mode_replace")):
-            rb = QRadioButton(t(key))
-            rb.setChecked(self.mode == mode)
-            rb.setEnabled(not self.busy)
-            rb.toggled.connect(lambda on, m=mode: on and self.set_mode(m))
-            group.addButton(rb)
-            opts.addWidget(rb)
-            hint = label(t(f"{key}_hint"), "hint", wrap=True)
-            hint.setContentsMargins(26, 0, 0, 6)
-            opts.addWidget(hint)
-        cb = QCheckBox(t("lightweight"))
-        cb.setChecked(self.lightweight)
-        cb.setEnabled(not self.busy)
-        cb.toggled.connect(self.set_lightweight)
-        opts.addWidget(cb)
-        lh = label(t("lightweight_hint"), "hint", wrap=True)
-        lh.setContentsMargins(26, 0, 0, 0)
-        opts.addWidget(lh)
-        h.addLayout(opts, 1)
-
-        n = sum(1 for i in self.items.values() if i.cleanable)
-        text = t("btn_clean_none") if n == 0 else (
-            t("btn_clean_one") if n == 1 else t("btn_clean", n=n))
-        go = button(text, "get_lg", "scrub", icon_color="#000000")
-        go.setEnabled(n > 0 and not self.busy and self.mat2.available)
-        go.clicked.connect(self.clean)
-        h.addWidget(go, 0, Qt.AlignmentFlag.AlignVCenter)
-        return box
-
-    def _limits(self) -> QWidget:
-        box = GlassFrame(radius=16)
-        v = QVBoxLayout(box)
-        v.setContentsMargins(22, 16, 22, 16)
-        v.setSpacing(6)
-        v.addWidget(label(t("sec_limits"), "section"))
-        for key in ("limit_content", "limit_pdf", "limit_images", "limit_identity"):
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            ic = QLabel()
-            ic.setPixmap(glyph_pixmap("point", 13, "#6f6f75"))
-            row.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
-            row.addWidget(label(t(key), "hint", wrap=True), 1)
-            v.addLayout(row)
         return box
