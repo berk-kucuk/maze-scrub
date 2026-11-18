@@ -5,7 +5,7 @@
 
 pkgname=maze-scrub
 pkgver=1.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Maze Scrub — see what your photos and documents reveal about you, then remove it (mat2)"
 arch=('any')
 url="https://mazelinux.berkkucukk.com.tr"
@@ -17,6 +17,7 @@ license=('GPL3')
 depends=(
     'maze-python'   # shared Python runtime with PyQt6: /opt/maze/venv
     'mat2'          # the metadata engine (pulls in exiftool, mutagen, poppler)
+    'bubblewrap'    # boxes the parsers in while they read untrusted files
     'python'        # /usr/bin/python3, which mat2 is built for
     'glib2'         # `gio trash`, for originals on another drive
 )

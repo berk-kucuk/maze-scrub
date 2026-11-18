@@ -108,8 +108,8 @@ class FileModel(QAbstractListModel):
         self.win = win
         self.keys: list[str] = []
 
-    def rowCount(self, parent=QModelIndex()) -> int:
-        return 0 if parent.isValid() else len(self.keys)
+    def rowCount(self, parent: QModelIndex | None = None) -> int:
+        return 0 if parent is not None and parent.isValid() else len(self.keys)
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or index.row() >= len(self.keys):

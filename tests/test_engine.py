@@ -405,3 +405,27 @@ class RealMat2TestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+@unittest.skipUnless(shutil.which("bwrap"), "bubblewrap not installed")
+class SandboxTests(unittest.TestCase):
+    """SC1: the parsers run without the user's home, network or session."""
+
+    def _probe(self, request, d):
+        import subprocess as _sp
+        argv = engine._sandbox(request, ["sh", "-c",
+            "echo home=$(ls -A ~ | wc -l); ls ~/.ssh >/dev/null 2>&1 && echo SSH || echo nossh; "
+            "(exec 3<>/dev/tcp/1.1.1.1/53) 2>/dev/null && echo NET || echo nonet; "
+            f"touch '{d}/w' 2>/dev/null && echo rw || echo ro"])
+        return _sp.run(argv, capture_output=True, text=True, timeout=30).stdout.split()
+
+    def test_clean_sees_only_its_directory_writable(self):
+        d = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".scrub-sbx-"))
+        try:
+            (d / "a.jpg").touch()
+            out = self._probe({"op": "clean", "jobs": [{"path": str(d / "a.jpg")}]}, d)
+            self.assertEqual(out, ["home=1", "nossh", "nonet", "rw"])
+            out = self._probe({"op": "inspect", "paths": [str(d / "a.jpg")]}, d)
+            self.assertEqual(out, ["home=1", "nossh", "nonet", "ro"])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)

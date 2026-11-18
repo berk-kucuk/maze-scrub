@@ -21,6 +21,7 @@ import queue
 import re
 import secrets
 import select
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -140,6 +141,46 @@ def _env() -> dict:
     return {k: os.environ[k] for k in keep if k in os.environ}
 
 
+def _sandbox(request: dict, argv: list[str]) -> list[str]:
+    """Run the helper boxed in (audit SC1).
+
+    mat2 hands each file to its parsers — exiftool (Perl), ffmpeg, poppler —
+    and those are exactly what a crafted file attacks (exiftool's
+    CVE-2021-22204 ran code from an image). With the user's full rights a
+    successful attack owned their home, keys and network. Inside: the system
+    read-only; no network; home, other users and removable drives empty
+    except the directories of the files in this request — read-only for
+    "inspect", writable for "clean" (the cleaned copy goes next to the
+    original); no session bus, agents or capabilities. Without bwrap the
+    helper runs as it always did.
+    """
+    if not shutil.which("bwrap"):
+        return argv
+    rw = request.get("op") == "clean"
+    paths = [j.get("path", "") for j in request.get("jobs", [])] if rw else request.get("paths", [])
+    dirs = sorted({os.path.dirname(os.path.abspath(p)) for p in paths if p})
+    home = os.path.expanduser("~")
+    hidden = [d for d in ("/home", "/run/media", "/media", "/mnt") if os.path.isdir(d)]
+    box = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+           "--tmpfs", "/tmp"]
+    for d in hidden:
+        box += ["--tmpfs", d]
+    box += ["--tmpfs", home, "--tmpfs", "/run/user"]
+    # The helper itself and its interpreter, read-only — they may live under
+    # a hidden tree (a checkout on a USB disk, a venv in a home).
+    code = {str(HELPER.parent), os.path.dirname(os.path.realpath(argv[0]))}
+    code |= {p for p in os.environ.get("MAZE_SCRUB_TEST_LIBPATH", "").split(os.pathsep) if p}
+    for d in sorted(code):
+        if os.path.isdir(d):
+            box += ["--ro-bind", os.path.realpath(d), d]
+    for d in dirs:
+        box += ["--bind" if rw else "--ro-bind", os.path.realpath(d), d]
+    box += ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
+            "--unsetenv", "DBUS_SESSION_BUS_ADDRESS", "--unsetenv", "SSH_AUTH_SOCK",
+            "--unsetenv", "XDG_RUNTIME_DIR", "--setenv", "TMPDIR", "/tmp", "--"]
+    return box + argv
+
+
 def _stream(request: dict, cancel=None,
             timeout: float = TIMEOUT_PER_FILE) -> Iterator[dict]:
     """Run the helper and yield its reply lines as they arrive.
@@ -154,7 +195,7 @@ def _stream(request: dict, cancel=None,
         raise ScrubError("no_python", py)
     err = tempfile.TemporaryFile()
     try:
-        proc = subprocess.Popen([py, "-I", str(HELPER)], stdin=subprocess.PIPE,
+        proc = subprocess.Popen(_sandbox(request, [py, "-I", str(HELPER)]), stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=err, env=_env())
     except OSError as e:
         err.close()
